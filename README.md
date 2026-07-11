@@ -14,9 +14,10 @@ npm install -g @zakiaziz/postmark-cli
 Local development:
 
 ```bash
-bun install
-bun run build
-bun link
+npm install
+npm run build
+npm test
+npm link
 ```
 
 ## Setup

@@ -15,8 +15,8 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit",
     "test": "tsc -p tsconfig.test.json && node --test dist-test/test/**/*.test.js",
-    "prepack": "bun run build",
-    "dev": "bun run src/cli.ts"
+    "prepack": "npm run build",
+    "dev": "tsc -p tsconfig.json --watch"
   },
   "engines": {
     "node": ">=20"
