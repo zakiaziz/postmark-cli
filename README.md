@@ -1,208 +1,383 @@
-# Postmark CLI
+# postmark-cli
 
-A CLI for Postmark account and server APIs. This repository owns the `postmark` executable.
+Command-line interface for the Postmark API. It sends email and templates, manages servers, domains, sender signatures, message streams, webhooks, inbound rules, and suppressions, reads bounces, messages, and statistics, and sends raw API requests. It is not an official Postmark product.
 
 ## Install
 
-Install from npm with Node 22 or newer, or with Bun:
+Requires Node.js 22 or newer.
 
 ```bash
 npm install -g @zakiaziz/postmark-cli
 bun add -g @zakiaziz/postmark-cli
+cd postmark-cli && bun run build && bun link
 ```
 
-To work on the CLI, build and link a checkout with `bun install`, `bun run build`, and `bun link`.
-
-## Setup
+## Quick start
 
 ```bash
-export POSTMARK_SERVER_TOKEN='...'
-postmark setup work --from-env
-postmark auth verify
-postmark templates list
-postmark templates list --format pretty
-postmark templates list --format human
+postmark setup
+# List the most recent bounces as a table.
+postmark bounces list --page-size 20 --format human
+# Search outbound messages sent to one recipient.
+postmark messages outbound search --query recipient=user@example.com
+# Preview deleting a template without sending the request.
+postmark templates delete welcome-email --dry-run
 ```
-
-Setup creates and activates a profile. It never overwrites an existing profile and does not prompt for secrets. Use environment variables or profile files protected with mode 0600. Configuration directories use mode 0700.
-
-Precedence is explicit flags, `POSTMARK_ACCOUNT_TOKEN`/`POSTMARK_SERVER_TOKEN`/`POSTMARK_BASE_URL`, selected profile, global configuration, then defaults. Profile selection is `--profile`, `POSTMARK_PROFILE`, then the active profile. A missing selected profile fails with exit 3, even if a token exists in the environment. An absolute `XDG_CONFIG_HOME` selects the configuration root; otherwise the CLI uses `~/.config/postmark`. The default API origin is `https://api.postmarkapp.com`.
-
-`auth verify` checks the available token classes using account `/servers` or server `/server`. Use `--auth account` or `--auth server` to select one. This proves access to those resources, not full permission coverage or user identity. Mixed success exits 8 and records each outcome. Total failure preserves the underlying error code.
-
-## Output and automation
-
-Every operational command defaults to compact, uncolored JSON plus one newline, including in a terminal. First-class results use `{"data":...,"meta":...}`. Collections use an array; individual resources use an object or null. Provider field names remain unchanged. Provider resource responses, such as server API-token fields, intentionally retain returned secrets; profile/config inspection and diagnostics redact them. Raw API results retain provider JSON shape; text becomes a JSON string and an empty body becomes null. Binary responses fail explicitly.
-
-`--format pretty` produces the same document with two-space indentation and syntax highlighting. `--format human` produces tables or labeled fields. Color defaults to auto and applies independently to stdout/stderr. Auto requires a terminal and an unset or empty `NO_COLOR`; `--color always` overrides both conditions. JSON never includes ANSI color. Help, version, and completion scripts are text exceptions.
-
-Results use stdout. Prompts, diagnostics, and errors use stderr. `--quiet` preserves results and errors; `--verbose` emits redacted request diagnostics. The flags conflict.
-
-Mutations require terminal confirmation or `--yes`. The prompt identifies the profile, target, and effect. CI, nonterminal stdin, `--no-input`, and request content from stdin disable prompts; missing confirmation exits 9. CI is active when `CI` is nonempty and is neither 0 nor false, ignoring case. `--dry-run` validates locally and prints a redacted request without network access or writes. Preview success does not guarantee execution success.
-
-Template validation is a read-only POST. Raw non-GET/HEAD/OPTIONS calls conservatively require confirmation. Sends, removals, and deletes can have irreversible effects; there is no general undo. Batches are not atomic and do not roll back completed items. A partial batch or auth verification returns exit 8 with all provider outcomes in `error.partial`. Async bulk/data-removal responses preserve the provider job ID/status fields; this CLI has no wait option.
-
-## Input
-
-IDs remain opaque strings. Suppressions take their stream scope through `--message-stream` or the profile defaultMessageStream. Ordinary text, including `@file`, is literal.
-
-Use `--file PATH` for complete JSON input, or `--file -` for stdin. Files must contain an object or array matching the command. First-class non-batch bodies require a nonempty object. Email batches require 1..500 objects; template batches use a Messages array of 1..500 objects; suppression batches use a Suppressions array of 1..50 explicit EmailAddress objects. File input conflicts with field assignments.
-
-First-class body commands accept repeatable `--set Path=value`: numbers, booleans, null, objects, and arrays use JSON types; other input is literal text. Empty strings and null remain distinct from omitted fields. The provider defines whether a supplied empty string or null clears a field; no implicit removal is applied. Dotted paths cannot contain prototype keys. Scalar options cannot repeat. Unsupported flags and extra arguments fail before requests. Both `--name value` and `--name=value` work; `--` ends option parsing.
-
-Read filters use repeatable `--query name=value` with exact provider names and literal values. Unknown CLI options never become API fields. For first-class paginated commands, use `--page-size` and `--cursor` instead of count/offset query fields.
-
-Date filters retain their provider contract; the CLI performs no timezone conversion. Message-search dates accept Postmark's ISO 8601 date/date-time syntax, including explicit offsets. Use an explicit offset when timezone matters; a date-only or offset-free value is interpreted by Postmark, not by your machine. Suppression fromdate/todate boundaries are inclusive. Message and statistics boundary/timezone details are provider-owned, and this CLI does not normalize them. See the linked endpoint reference before combining filters.
-
-## Pagination
-
-Paginated reads fetch one page by default, with count 100 and offset 0. `--page-size` accepts 1..500. `--all` traverses pages, and `--max-items` bounds that traversal while preserving the next unread offset in `meta.next_cursor`. Ordering comes from Postmark and can change if the underlying collection changes.
-
-Outbound/inbound message search and open search enforce the provider's 10,000 count-plus-offset limit. At a provider cap, `meta.has_more` stays true, `meta.truncated` is true, and `next_cursor` is null; narrow the filters. Streams, webhooks, and suppression lists do not expose offset pagination and reject those flags.
-
-Automatic retries are disabled, a documented `CLI-RETRY-1` SHOULD exception (see [CLI conventions](docs/cli-conventions.md)). Explicit request counts help callers reason about writes whose outcomes are unknown. A retryable error does not mean retrying a mutation is safe.
-
-## Errors
-
-Errors use the selected output format on stderr. Structured errors contain code, message, retryable, and provider status/code/request ID when available. Exit codes are 0 success, 1 unexpected/provider response failure, 2 input, 3 configuration/authentication, 4 permission, 5 missing resource, 6 conflict, 7 transient/network, 8 partial, 9 confirmation, and 130 interruption.
-
-## Raw API
-
-```bash
-postmark api request GET /server --auth server
-postmark api request GET /servers --auth account --query count=10 --query offset=0
-postmark api request PUT /server --auth server --file request.json --dry-run
-```
-
-Supported methods are GET, HEAD, OPTIONS, POST, PUT, PATCH, and DELETE. Authentication uses the selected Postmark token class. Request bodies use JSON and `--file`; field shorthand is first-class only. Paths remain on the selected origin, and redirects are rejected. Read-only raw methods reject body, confirmation, and dry-run flags.
-
-## Global options
-
-- `--profile`: NAME; selected profile, otherwise POSTMARK_PROFILE or active profile
-- `--format`: json|pretty|human; default compact uncolored json
-- `--color`: auto|always|never; default auto, presentation formats only
-- `--quiet`: -q; suppress notices, preserve results and errors
-- `--verbose`: -v; redacted request diagnostics on stderr
-- `--no-input`: Never prompt; also enforced for CI and nonterminal stdin
-- `--timeout`: DURATION; default 30s, positive ms/s/m, maximum 2147483647ms
-- `--help`: -h; local help without authentication or network
-- `--version`: Print executable name and version; no short alias
 
 ## Commands
 
-| Command | Authentication | Effect |
+### bounces
+
+| Command | Description | Options |
 | --- | --- | --- |
-| `postmark emails send` | server | Send a single email. |
-| `postmark emails batch-send` | server | Send batch emails. |
-| `postmark bulk send` | server | Send bulk emails. |
-| `postmark bulk get <bulkRequestId>` | server | Get the status/details of a bulk API request. |
-| `postmark bounces delivery-stats get` | server | Get delivery stats. |
-| `postmark bounces list` | server | Get bounces. |
-| `postmark bounces get <bounceId>` | server | Get a single bounce. |
-| `postmark bounces dump get <bounceId>` | server | Get bounce dump. |
-| `postmark bounces activate <bounceId>` | server | Activate a bounce. |
-| `postmark templates send` | server | Send email with template. |
-| `postmark templates batch-send` | server | Send batch with templates. |
-| `postmark templates push` | server | Push templates to another server. |
-| `postmark templates get <templateIdOrAlias>` | server | Get a template. |
-| `postmark templates create` | server | Create a template. |
-| `postmark templates update <templateIdOrAlias>` | server | Edit a template. |
-| `postmark templates list` | server | List templates. |
-| `postmark templates delete <templateIdOrAlias>` | server | Delete a template. |
-| `postmark templates validate` | server | Validate a template. |
-| `postmark server get` | server | Get the current server. |
-| `postmark server update` | server | Edit the current server. |
-| `postmark servers list` | account | List servers. |
-| `postmark servers get <serverId>` | account | Get a server. |
-| `postmark servers create` | account | Create a server. |
-| `postmark servers update <serverId>` | account | Edit a server. |
-| `postmark servers delete <serverId>` | account | Delete a server. |
-| `postmark streams list` | server | List message streams. |
-| `postmark streams get <streamId>` | server | Get a message stream. |
-| `postmark streams create` | server | Create a message stream. |
-| `postmark streams update <streamId>` | server | Edit a message stream. |
-| `postmark streams archive <streamId>` | server | Archive a message stream. |
-| `postmark streams restore <streamId>` | server | Unarchive a message stream. |
-| `postmark messages outbound search` | server | Search outbound messages. |
-| `postmark messages outbound get <messageId>` | server | Get outbound message details. |
-| `postmark messages outbound export <messageId>` | server | Get outbound message dump. |
-| `postmark messages inbound search` | server | Search inbound messages. |
-| `postmark messages inbound get <messageId>` | server | Get inbound message details. |
-| `postmark messages inbound bypass <messageId>` | server | Bypass rules for a blocked inbound message. |
-| `postmark messages inbound retry <messageId>` | server | Retry a failed inbound message for processing. |
-| `postmark messages opens search` | server | Search message opens. |
-| `postmark messages opens get <messageId>` | server | Get opens for a single message. |
-| `postmark messages clicks search` | server | Search message clicks. |
-| `postmark messages clicks get <messageId>` | server | Get clicks for a single message. |
-| `postmark domains list` | account | List domains. |
-| `postmark domains get <domainId>` | account | Get a domain's details. |
-| `postmark domains create` | account | Create a domain. |
-| `postmark domains update <domainId>` | account | Edit a domain. |
-| `postmark domains delete <domainId>` | account | Delete a domain. |
-| `postmark domains verify-dkim <domainId>` | account | Verify DKIM status. |
-| `postmark domains verify-return-path <domainId>` | account | Verify Return-Path status. |
-| `postmark domains verify-spf <domainId>` | account | Verify an SPF record. |
-| `postmark domains rotate-dkim <domainId>` | account | Rotate DKIM keys. |
-| `postmark signatures list` | account | List sender signatures. |
-| `postmark signatures get <signatureId>` | account | Get a sender signature's details. |
-| `postmark signatures create` | account | Create a sender signature. |
-| `postmark signatures update <signatureId>` | account | Edit a sender signature. |
-| `postmark signatures delete <signatureId>` | account | Delete a sender signature. |
-| `postmark signatures resend-confirmation <signatureId>` | account | Resend a sender signature confirmation. |
-| `postmark signatures verify-spf <signatureId>` | account | Verify sender signature SPF. |
-| `postmark signatures request-new-dkim <signatureId>` | account | Request a new DKIM for a sender signature. |
-| `postmark stats outbound get --metric overview` | server | Get outbound overview. |
-| `postmark stats outbound get --metric sends` | server | Get sent counts. |
-| `postmark stats outbound get --metric bounces` | server | Get bounce counts. |
-| `postmark stats outbound get --metric spam` | server | Get spam complaints. |
-| `postmark stats outbound get --metric tracked` | server | Get tracked email counts. |
-| `postmark stats outbound get --metric opens` | server | Get email open counts. |
-| `postmark stats outbound get --metric open-platforms` | server | Get email platform usage. |
-| `postmark stats outbound get --metric open-clients` | server | Get email client usage. |
-| `postmark stats outbound get --metric clicks` | server | Get click counts. |
-| `postmark stats outbound get --metric click-browser-families` | server | Get browser usage. |
-| `postmark stats outbound get --metric click-platforms` | server | Get browser platform usage. |
-| `postmark stats outbound get --metric click-location` | server | Get click location. |
-| `postmark inbound-rules list` | server | List inbound rule triggers. |
-| `postmark inbound-rules create` | server | Create an inbound rule trigger. |
-| `postmark inbound-rules delete <triggerId>` | server | Delete an inbound rule trigger. |
-| `postmark webhooks list` | server | List webhooks. |
-| `postmark webhooks get <webhookId>` | server | Get a webhook. |
-| `postmark webhooks create` | server | Create a webhook. |
-| `postmark webhooks update <webhookId>` | server | Edit a webhook. |
-| `postmark webhooks delete <webhookId>` | server | Delete a webhook. |
-| `postmark suppressions list --message-stream <stream-id>` | server | Dump suppressions for a message stream. |
-| `postmark suppressions batch-create --message-stream <stream-id>` | server | Create a suppression for a message stream. |
-| `postmark suppressions batch-delete --message-stream <stream-id>` | server | Delete a suppression for a message stream. |
-| `postmark data-removals create` | account | Create a Data Removal request. |
-| `postmark data-removals get <requestId>` | account | Check a Data Removal request status. |
+| postmark bounces list | List bounces. | --query KEY=VALUE, --page-size N, --cursor TOKEN, --all, --max-items N |
+| postmark bounces get BOUNCE_ID | Get one bounce. | --query KEY=VALUE |
+| postmark bounces activate BOUNCE_ID | Reactivate the address of a bounce. | --yes, --dry-run |
+| postmark bounces delivery-stats get | Get delivery and bounce counts for the server. | --query KEY=VALUE |
+| postmark bounces dump get BOUNCE_ID | Get the raw source of a bounce. | --query KEY=VALUE |
 
-### Local utilities and raw requests
+### data-removals
 
-- `postmark setup [profile]`: Create and activate a local profile; existing profiles require profiles update.
-- `postmark profiles list`: List local profiles.
-- `postmark profiles get <name>`: Inspect a profile with tokens redacted.
-- `postmark profiles create <name>`: Create a local profile.
-- `postmark profiles update <name>`: Change supplied local profile fields.
-- `postmark profiles delete <name>`: Delete an inactive local profile.
-- `postmark profiles use <name>`: Select an existing profile.
-- `postmark config list`: Read local configuration.
-- `postmark config path`: Show local configuration paths.
-- `postmark config get <key>`: Read activeProfile or baseUrl.
-- `postmark config set <key> <value>`: Set activeProfile or baseUrl.
-- `postmark config unset <key>`: Clear activeProfile or baseUrl.
-- `postmark auth verify [--auth account|server]`: Check access to account /servers or current /server; does not prove all permissions.
-- `postmark api request <METHOD> <path>`: Send a raw same-origin request; GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE.
-- `postmark bounces types list`: List documented bounce type names locally.
-- `postmark bounces rebound-snippet get`: Return the rebound snippet documentation URL.
-- `postmark completions bash`: Print Bash completion code; does not edit shell files.
-- `postmark completions zsh`: Print Zsh completion code; does not edit shell files.
-- `postmark completions fish`: Print Fish completion code; does not edit shell files.
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark data-removals get REQUEST_ID | Get the status of a data removal request. | --query KEY=VALUE |
+| postmark data-removals create | Create a data removal request. | --file PATH, --yes, --dry-run |
 
-## Specifications and development
+### domains
 
-`docs/commands.json` records every command contract and shared policies. Help and completion derive from `src/commands.ts` and `src/endpoints.ts`. Completion prints shell code without editing files or requesting network data.
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark domains list | List domains. | --query KEY=VALUE, --page-size N, --cursor TOKEN, --all, --max-items N |
+| postmark domains get DOMAIN_ID | Get one domain. | --query KEY=VALUE |
+| postmark domains create | Create a domain. | --file PATH, --yes, --dry-run |
+| postmark domains update DOMAIN_ID | Update a domain. | --file PATH, --yes, --dry-run |
+| postmark domains delete DOMAIN_ID | Delete a domain. | --yes, --dry-run |
+| postmark domains verify-dkim DOMAIN_ID | Verify the DKIM record of a domain. | --yes, --dry-run |
+| postmark domains verify-return-path DOMAIN_ID | Verify the Return-Path record of a domain. | --yes, --dry-run |
+| postmark domains verify-spf DOMAIN_ID | Verify the SPF record of a domain. | --yes, --dry-run |
+| postmark domains rotate-dkim DOMAIN_ID | Rotate the DKIM keys of a domain. | --yes, --dry-run |
 
-Run `bun run check`, `bun test`, and `bun run build`. No runtime packages are required.
+### emails
 
-Provider references: [templates](https://postmarkapp.com/developer/api/templates-api), [messages](https://postmarkapp.com/developer/api/messages-api), [streams](https://postmarkapp.com/developer/api/message-streams-api), and [suppressions](https://postmarkapp.com/developer/api/suppressions-api).
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark emails send | Send one email. | --file PATH, --yes, --dry-run |
+| postmark emails bulk get BULK_REQUEST_ID | Get the status of a bulk email request. | --query KEY=VALUE |
+| postmark emails bulk send | Start a bulk email request. | --file PATH, --yes, --dry-run |
+
+### inbound-rules
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark inbound-rules list | List inbound rule triggers. | --query KEY=VALUE, --page-size N, --cursor TOKEN, --all, --max-items N |
+| postmark inbound-rules create | Create an inbound rule trigger. | --file PATH, --yes, --dry-run |
+| postmark inbound-rules delete TRIGGER_ID | Delete an inbound rule trigger. | --yes, --dry-run |
+
+### messages
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark messages clicks list MESSAGE_ID | List the clicks of one message. | --query KEY=VALUE, --page-size N, --cursor TOKEN, --all, --max-items N |
+| postmark messages clicks search | Search message clicks. | --query KEY=VALUE, --page-size N, --cursor TOKEN, --all, --max-items N |
+| postmark messages inbound get MESSAGE_ID | Get the details of an inbound message. | --query KEY=VALUE |
+| postmark messages inbound search | Search inbound messages. | --query KEY=VALUE, --page-size N, --cursor TOKEN, --all, --max-items N |
+| postmark messages inbound bypass MESSAGE_ID | Bypass the rules that blocked an inbound message. | --yes, --dry-run |
+| postmark messages inbound retry MESSAGE_ID | Retry a failed inbound message. | --yes, --dry-run |
+| postmark messages opens list MESSAGE_ID | List the opens of one message. | --query KEY=VALUE, --page-size N, --cursor TOKEN, --all, --max-items N |
+| postmark messages opens search | Search message opens. | --query KEY=VALUE, --page-size N, --cursor TOKEN, --all, --max-items N |
+| postmark messages outbound get MESSAGE_ID | Get the details of an outbound message. | --query KEY=VALUE |
+| postmark messages outbound search | Search outbound messages. | --query KEY=VALUE, --page-size N, --cursor TOKEN, --all, --max-items N |
+| postmark messages outbound export MESSAGE_ID | Export the raw source of an outbound message. | --query KEY=VALUE |
+
+### server
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark server get | Get the current server. | --query KEY=VALUE |
+| postmark server update | Update the current server. | --file PATH, --yes, --dry-run |
+
+### servers
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark servers list | List servers. | --query KEY=VALUE, --page-size N, --cursor TOKEN, --all, --max-items N |
+| postmark servers get SERVER_ID | Get one server. | --query KEY=VALUE |
+| postmark servers create | Create a server. | --file PATH, --yes, --dry-run |
+| postmark servers update SERVER_ID | Update a server. | --file PATH, --yes, --dry-run |
+| postmark servers delete SERVER_ID | Delete a server. | --yes, --dry-run |
+
+### signatures
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark signatures list | List sender signatures. | --query KEY=VALUE, --page-size N, --cursor TOKEN, --all, --max-items N |
+| postmark signatures get SIGNATURE_ID | Get one sender signature. | --query KEY=VALUE |
+| postmark signatures create | Create a sender signature. | --file PATH, --yes, --dry-run |
+| postmark signatures update SIGNATURE_ID | Update a sender signature. | --file PATH, --yes, --dry-run |
+| postmark signatures delete SIGNATURE_ID | Delete a sender signature. | --yes, --dry-run |
+| postmark signatures resend-confirmation SIGNATURE_ID | Resend the confirmation email of a sender signature. | --yes, --dry-run |
+| postmark signatures verify-spf SIGNATURE_ID | Verify the SPF record of a sender signature. | --yes, --dry-run |
+| postmark signatures request-new-dkim SIGNATURE_ID | Request a new DKIM key for a sender signature. | --yes, --dry-run |
+
+### stats
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark stats outbound get | Get outbound statistics for one metric. | --metric METRIC, --query KEY=VALUE |
+
+### streams
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark streams list | List message streams. | --query KEY=VALUE |
+| postmark streams get STREAM_ID | Get one message stream. | --query KEY=VALUE |
+| postmark streams create | Create a message stream. | --file PATH, --yes, --dry-run |
+| postmark streams update STREAM_ID | Update a message stream. | --file PATH, --yes, --dry-run |
+| postmark streams archive STREAM_ID | Archive a message stream. | --yes, --dry-run |
+| postmark streams restore STREAM_ID | Restore an archived message stream. | --yes, --dry-run |
+
+### suppressions
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark suppressions list | List the suppressions of a message stream. | --message-stream ID, --query KEY=VALUE |
+| postmark suppressions batch-create | Suppress up to 50 addresses in a message stream. | --message-stream ID, --file PATH, --yes, --dry-run |
+| postmark suppressions batch-delete | Remove up to 50 suppressions from a message stream. | --message-stream ID, --file PATH, --yes, --dry-run |
+
+### templates
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark templates list | List templates. | --query KEY=VALUE, --page-size N, --cursor TOKEN, --all, --max-items N |
+| postmark templates get TEMPLATE_ID_OR_ALIAS | Get one template. | --query KEY=VALUE |
+| postmark templates create | Create a template. | --file PATH, --yes, --dry-run |
+| postmark templates update TEMPLATE_ID_OR_ALIAS | Update a template. | --file PATH, --yes, --dry-run |
+| postmark templates delete TEMPLATE_ID_OR_ALIAS | Delete a template. | --yes, --dry-run |
+| postmark templates send | Send one email from a template. | --file PATH, --yes, --dry-run |
+| postmark templates push | Push templates to another server. | --file PATH, --yes, --dry-run |
+| postmark templates validate | Validate a template and render a test. | --file PATH |
+
+### webhooks
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark webhooks list | List webhooks. | --query KEY=VALUE |
+| postmark webhooks get WEBHOOK_ID | Get one webhook. | --query KEY=VALUE |
+| postmark webhooks create | Create a webhook. | --file PATH, --yes, --dry-run |
+| postmark webhooks update WEBHOOK_ID | Update a webhook. | --file PATH, --yes, --dry-run |
+| postmark webhooks delete WEBHOOK_ID | Delete a webhook. | --yes, --dry-run |
+
+### setup
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark setup [NAME] | Create and activate a profile. | --account-token-file PATH, --server-token-file PATH, --base-url URL, --from-env |
+
+### profiles
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark profiles list | List saved profiles. | None |
+| postmark profiles get NAME | Get one saved profile with secrets redacted. | None |
+| postmark profiles create NAME | Create a profile without activating it. | --account-token-file PATH, --server-token-file PATH, --base-url URL |
+| postmark profiles update NAME | Update fields of a profile. | --account-token-file PATH, --server-token-file PATH, --base-url URL, --clear-base-url |
+| postmark profiles delete NAME | Delete a profile. | None |
+| postmark profiles use NAME | Make a profile the active profile. | None |
+
+### config
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark config list | List every configuration key. | None |
+| postmark config get KEY | Get one configuration value. | None |
+| postmark config set KEY VALUE | Set one configuration value. | None |
+| postmark config unset KEY | Remove one configuration value. | None |
+| postmark config path | Get the configuration paths. | None |
+
+### auth
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark auth verify | Verify the account token and server token. | None |
+
+### api
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark api request METHOD PATH | Send a raw API request. | --query KEY=VALUE, --file PATH, --yes, --dry-run |
+
+### completions
+
+| Command | Description | Options |
+| --- | --- | --- |
+| postmark completions SHELL | Print a shell completion script. | None |
+
+## Global options
+
+| Option | Description |
+| --- | --- |
+| -h, --help | Show help. Uses no credentials or network. |
+| --version | Print the executable name and version. |
+| --profile NAME | Select a saved profile. |
+| --format FORMAT | Output format. Allowed: json, pretty, human. Default: json. |
+| --color WHEN | Color for pretty and human output. Allowed: auto, always, never. Default: auto. |
+| -q, --quiet | Suppress progress and notices. Results and errors still print. |
+| -v, --verbose | Print redacted diagnostics to stderr. |
+| --no-input | Never prompt. Fail when input is missing. |
+| --timeout DURATION | Per-request timeout in ms, s, or m, from 1ms to 10m. Default: 30s. |
+
+Network commands (the resource commands, `auth verify`, and `api request`) accept every option except `--version`. Local commands (`setup`, `profiles`, and `config`) accept `--help`, `--format`, `--color`, `--quiet`, `--verbose`, and `--no-input`. `completions` accepts only `--help`. With no command, only `--help`, `--version`, `--verbose`, and `--quiet` apply, and `--version` with a command word fails.
+
+## Authentication
+
+Postmark uses two token types. A server token (`X-Postmark-Server-Token`) sends email and manages one server. An account token (`X-Postmark-Account-Token`) manages servers, domains, sender signatures, and data removals. The two tokens form one credential set, so you supply both together, and every request sends both.
+
+```bash
+postmark setup work --account-token-file ./postmark-account-token.txt --server-token-file ./postmark-server-token.txt
+postmark auth verify
+```
+
+`setup [NAME]` creates a profile (default name: `default`) and makes it the active profile. It fails when the profile exists. If activation fails after the profile is written, the profile stays saved and `setup` exits 8 with `PARTIAL_FAILURE`. In a terminal without `--no-input`, `setup` prompts for a missing token with hidden input. Secrets are never command-line values: pass `--account-token-file PATH` and `--server-token-file PATH` (`-` reads stdin), set `POSTMARK_ACCOUNT_TOKEN` and `POSTMARK_SERVER_TOKEN`, or enter the tokens at the prompt. `setup --from-env` copies `POSTMARK_ACCOUNT_TOKEN`, `POSTMARK_SERVER_TOKEN`, and `POSTMARK_BASE_URL` into the profile and cannot be combined with the token file options or `--base-url`.
+
+| Variable | Purpose |
+| --- | --- |
+| `POSTMARK_PROFILE` | Select a saved profile. |
+| `POSTMARK_ACCOUNT_TOKEN` | Postmark account token. |
+| `POSTMARK_SERVER_TOKEN` | Postmark server token. |
+| `POSTMARK_BASE_URL` | API base URL. Default: `https://api.postmarkapp.com`. |
+| `XDG_CONFIG_HOME` | Configuration root when it is an absolute path. Otherwise `~/.config`. |
+| `NO_COLOR` | Disables color with `--color auto` when set and nonempty. |
+| `CI` | Disables prompts when nonempty and not `0` or `false`. |
+
+A `POSTMARK_` variable that is set but empty, a malformed `POSTMARK_PROFILE`, and an invalid `POSTMARK_BASE_URL` fail with `CONFIGURATION_ERROR` and name the variable. None of them falls through to the next source.
+
+Precedence:
+
+1. Profile selection: `--profile`, `POSTMARK_PROFILE`, then `activeProfile` in `config.json`. A selected or active profile that does not exist fails with `CONFIGURATION_ERROR`, with no fallback.
+2. Credentials: the environment variables, then the selected profile. The set comes whole from the first source that supplies any part of it, and a partial set fails with `AUTHENTICATION_REQUIRED`.
+3. Base URL: `POSTMARK_BASE_URL`, the selected profile, `baseUrl` in `config.json`, then the default.
+
+`postmark auth verify` sends `GET /server`. Success proves that Postmark accepted the server token for that read, and `identity` holds the server `ID` and `Name`. It does not prove that the account token is valid or complete permission coverage.
+
+## Output and errors
+
+The default output format is `json`: one compact, uncolored line on stdout with the envelope `{"data":...,"meta":{...}}`. `--format pretty` prints the same document indented, with syntax highlighting when color applies. `--format human` prints tables for collections and labeled fields for one resource. Errors go to stderr in the selected format. Help, `--version`, and `completions` print plain text.
+
+`data` is an object for one resource, an array for a collection, or `null`, and keeps Postmark's field names. `meta` is always present.
+
+| `meta` key | When |
+| --- | --- |
+| `next_cursor` | Paginated collection reads. A string, or `null` when no page remains. |
+| `has_more` | Paginated collection reads. |
+| `provider` | Collection metadata that Postmark returns, such as `TotalCount`. |
+| `dry_run`, `validation` | Dry-run previews. `validation` is `local`. |
+
+Errors print one document on stderr, for example `{"error":{"code":"RATE_LIMITED","message":"...","hint":"...","retryable":true,"provider":{"status":429}}}`. Optional keys are `hint`, `outcome` (`unknown` when a mutation may have applied), `provider` (`status`, `code`, `request_id`, `retry_after_seconds`), `details`, and `partial`. `provider.code` holds the Postmark `ErrorCode` as a string. `--format human` prints `Error [CODE]: message` and `Hint: ...`.
+
+| Exit | Error codes |
+| --- | --- |
+| 0 | Success, including empty collections. |
+| 1 | `UNEXPECTED_ERROR`, `PROVIDER_ERROR`, `INVALID_RESPONSE`, `UNSUPPORTED_RESPONSE` |
+| 2 | `INVALID_ARGUMENT`, `INVALID_REQUEST` |
+| 3 | `CONFIGURATION_ERROR`, `AUTHENTICATION_REQUIRED`, `AUTHENTICATION_FAILED` |
+| 4 | `PERMISSION_DENIED` |
+| 5 | `NOT_FOUND` |
+| 6 | `CONFLICT` |
+| 7 | `RATE_LIMITED`, `TRANSIENT_FAILURE` |
+| 8 | `PARTIAL_FAILURE` |
+| 9 | `CONFIRMATION_REQUIRED`, `CONFIRMATION_DECLINED` |
+| 130 | `INTERRUPTED` |
+
+IDs are opaque strings, and each one is sent as a single percent-encoded path segment. Options accept `--name value` and `--name=value`, and `--` ends options. Unknown commands, options, extra arguments, invalid values, and conflicting options fail with exit code 2 before any request. Complete request bodies come only from `--file PATH` (`-` reads stdin), and provider filters on reads come from the repeatable `--query KEY=VALUE`. Postmark answers HTTP 200 for the suppression batch commands even when single addresses fail, so check the `Status` and `Message` of every item in `data`.
+
+Mutations (every command with `--yes` and `--dry-run`, and `api request` with `POST`, `PUT`, `PATCH`, or `DELETE`) need confirmation. The CLI validates arguments first, then resolves credentials (exit 3 when missing), then asks for confirmation. In a terminal, it shows the profile, operation, request, and effect, then prompts. `--yes` confirms without a prompt. With `--no-input`, a non-terminal stdin or stderr, or CI mode, a missing confirmation exits 9. Ctrl-C or end of input at a prompt exits 130 with `INTERRUPTED`. `--dry-run` prints a redacted preview of the request and sends nothing. It needs no credentials. Preview success does not guarantee that the request succeeds. `templates validate` is a read: it sends a POST that changes nothing, so it takes no `--yes` or `--dry-run`.
+
+Reads make up to 3 attempts on HTTP 429, 500, 502, 503, 504, network errors, and timeouts, waiting 250 ms, then 500 ms, or the `Retry-After` value up to 10 seconds. A `Retry-After` above 10 seconds is not waited on: the command fails with `RATE_LIMITED` and `provider.retry_after_seconds`. Mutations make one attempt. `--timeout` applies to each attempt. `--verbose` writes redacted request, response, and retry diagnostics to stderr.
+
+Server and webhook responses print as Postmark returns them, including `ApiTokens` and webhook credentials. Previews, diagnostics, `profiles get`, and `config list` stay redacted.
+
+## Pagination
+
+Paginated commands fetch one page by default. `--page-size` accepts 1 to 500 and defaults to 100. Postmark pages by offset, so `--cursor TOKEN` is the decimal offset of the first unread item, and `meta.next_cursor` is that offset as a string. Postmark sets the order and does not document it. `meta.provider.TotalCount` holds the total when Postmark reports it.
+
+`--all` follows every page. `--max-items N` (with `--all`) shrinks the last request so the read stops on a page boundary, and `meta.next_cursor` resumes it. `--cursor TOKEN` resumes from a previous `meta.next_cursor`, with or without `--all`. `--query` rejects `count` and `offset` on paginated commands; use `--page-size` and `--cursor`.
+
+```bash
+postmark bounces list --all --max-items 200 > bounces.json
+postmark bounces list --all --cursor "$(jq -r '.meta.next_cursor' bounces.json)"
+```
+
+`messages outbound search`, `messages inbound search`, and `messages opens search` reject an offset plus count above 10,000. `--cursor` accepts offsets from 0 to 9999 on those commands. Narrow the query with `--query` filters instead of paging further.
+
+A repeated cursor or an oversized page on the first page fails with `INVALID_RESPONSE` and exit 1. A failure on a later page exits 8 with `PARTIAL_FAILURE`. The items read so far are in `error.partial.data`, `error.partial.next_cursor` points at the first unread item, and `error.details.cause` names the underlying error code, such as `INVALID_RESPONSE`. `streams list`, `webhooks list`, and `suppressions list` are unpaginated: Postmark returns the full list.
+
+## Raw API access
+
+```bash
+postmark api request GET /server
+postmark api request GET /servers --query count=10 --query offset=0
+postmark api request PUT /server --file request.json --dry-run
+```
+
+Methods: `GET`, `HEAD`, `OPTIONS`, `POST`, `PUT`, `PATCH`, `DELETE`. `PATH` starts with a single `/` and has no scheme, host, query string, fragment, whitespace, or `.` and `..` segments. Add query parameters with the repeatable `--query KEY=VALUE`. `--file PATH` sends a JSON body as `application/json` (`-` reads stdin). `--file`, `--yes`, and `--dry-run` are rejected on `GET`, `HEAD`, and `OPTIONS`. The CLI sends the selected credentials, as the `X-Postmark-Account-Token` and `X-Postmark-Server-Token` headers, only to the configured API origin, and redirects fail. JSON responses print as parsed, other text prints as a JSON string, an empty body prints `null`, and binary responses fail with `UNSUPPORTED_RESPONSE`. Non-2xx responses use the same error mapping as other commands.
+
+## Configuration
+
+Files live in `$XDG_CONFIG_HOME/postmark` when `XDG_CONFIG_HOME` is an absolute path, and in `~/.config/postmark` otherwise.
+
+```text
+postmark/
+  config.json            {"activeProfile": "work", "baseUrl": "https://..."}
+  profiles/NAME.json     {"accountToken": "...", "serverToken": "...", "baseUrl": "https://..."}
+```
+
+Keys are camelCase. Files use mode `0600`, directories use mode `0700`, and writes are atomic: the CLI creates a temporary file exclusively with mode `0600` in the same directory, then renames it. Reads reject unknown keys and non-object JSON with `CONFIGURATION_ERROR`. Profile names match `^[A-Za-z0-9._-]+$` and are not `.` or `..`. `config.json` keys: `activeProfile` (read-only through `config`; change it with `profiles use`) and `baseUrl`. Profile fields: `accountToken`, `serverToken`, and `baseUrl`. Secrets are redacted in previews, diagnostics, `profiles get`, and `config list`.
+
+A base URL, from `--base-url`, `config set baseUrl`, `POSTMARK_BASE_URL`, or a stored file, must be an `https` URL (`http` only for `localhost`, `127.0.0.1`, or `::1`) with no credentials, query string, fragment, or path. Values are stored unchanged, and requests go to the URL's origin.
+
+Completion scripts come from `postmark completions bash|zsh|fish` and read only the command registry and local profile names. They complete commands, options, enum values (after `--OPT ` and `--OPT=`), `METHOD`, `SHELL`, and profile names (after `--profile` and for the `NAME` argument of `profiles get|update|delete|use`). They offer nothing after `--` or after an option that takes a free-form value.
+
+## Exceptions
+
+| Rule | Decision | Reason |
+| --- | --- | --- |
+| `CLI-GRAM-4` | `templates push` | Preserves the Postmark term "push templates". |
+| `CLI-GRAM-4` | `templates validate` | Preserves the Postmark term "validate a template". It is a read-only POST. |
+| `CLI-GRAM-4` | `bounces activate` | Preserves the Postmark term "activate a bounce". |
+| `CLI-GRAM-4` | `messages inbound bypass` | Preserves the Postmark term "bypass rules for a blocked inbound message". |
+| `CLI-GRAM-4` | `suppressions batch-delete` | Matches `suppressions batch-create` and Postmark's array-based suppression delete. |
+| `CLI-GRAM-4` | `domains verify-dkim`, `domains verify-return-path`, `domains verify-spf`, `signatures verify-spf` | Preserve the Postmark terms for verifying DKIM, Return-Path, and SPF records. |
+| `CLI-GRAM-4` | `domains rotate-dkim` | Preserves the Postmark term "rotate DKIM". |
+| `CLI-GRAM-4` | `signatures resend-confirmation`, `signatures request-new-dkim` | Preserve the Postmark terms "resend" and "request new DKIM". |
+| `CLI-BATCH-1` | `suppressions batch-create` and `suppressions batch-delete` exit 0 when Postmark reports failed items. | Postmark answers HTTP 200 with one result per address, and the CLI prints that response unchanged. Check every item's `Status` and `Message`. |
+| `CLI-PAGE-3` | At the 10,000 cap, `meta.next_cursor` is `10000`, which `--cursor` rejects. | Postmark offers no continuation past the cap on `messages outbound search`, `messages inbound search`, and `messages opens search`. |
+| `CLI-CFG-4` | Server responses print `ApiTokens` unredacted. | `server get`, `server update`, `servers list`, `servers get`, `servers create`, and `servers update` return the server resource, which contains its API tokens. Previews, diagnostics, `profiles get`, and `config list` stay redacted. |
+| `CLI-CFG-4` | Webhook responses print authentication credentials and custom header values unredacted. | `webhooks list`, `webhooks get`, `webhooks create`, and `webhooks update` return the webhook resource as Postmark stores it. Previews and diagnostics stay redacted. |
+
+## Development
+
+```bash
+bun run build
+bun run check
+bun link
+```
+
+`src/core/` is vendored from cli-core and is never edited here. Change cli-core and run its sync script instead. `docs/cli-conventions.md` restates the command-line contract this tool follows.
+
+## API references
+
+- [Email API](https://postmarkapp.com/developer/api/email-api)
+- [Bulk API](https://postmarkapp.com/developer/api/bulk-email)
+- [Bounce API](https://postmarkapp.com/developer/api/bounce-api)
+- [Templates API](https://postmarkapp.com/developer/api/templates-api)
+- [Messages API](https://postmarkapp.com/developer/api/messages-api)
+- [Message Streams API](https://postmarkapp.com/developer/api/message-streams-api)
+- [Servers API](https://postmarkapp.com/developer/api/servers-api)
+- [Domains API](https://postmarkapp.com/developer/api/domains-api)
+- [Sender Signatures API](https://postmarkapp.com/developer/api/signatures-api)
+- [Stats API](https://postmarkapp.com/developer/api/stats-api)
+- [Inbound rules](https://postmarkapp.com/developer/api/inbound-rules-triggers-api)
+- [Webhooks API](https://postmarkapp.com/developer/api/webhooks-api)
+- [Suppressions API](https://postmarkapp.com/developer/api/suppressions-api)
+- [Data Removals API](https://postmarkapp.com/developer/api/data-removals-api)
+
