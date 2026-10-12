@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
-import { usageError } from "./core/errors.js";
-import type { RequestSpec, ResourceCommand } from "./core/provider.js";
+import type { Endpoint as ResolvedEndpoint } from "./core/access.js";
+import { CliError, stepsFailure, usageError, type StepPartial } from "./core/errors.js";
+import type { HookHelpers, LocalCommand, RequestSpec, ResourceCommand, ResponseShape } from "./core/provider.js";
 import {
   FILE_OPTION,
   QUERY_OPTION,
@@ -15,6 +16,9 @@ import { invalidValue, isRecord, parseKeyValue, validateId } from "./core/values
 
 const BIN = "postmark";
 const PROVIDER = "Postmark";
+
+/** Commands that Postmark serves with the account token, by path prefix. Every other command uses the server token. */
+const ACCOUNT_COMMANDS = ["servers", "domains", "signatures", "data-removals", "templates push"];
 
 const PAGE = { max: 500, default: 100 };
 const CAPPED_OFFSET = 10_000;
@@ -41,9 +45,10 @@ const ACTION_VOCABULARY = [
   "batch-update",
 ];
 
-/** A request body that must hold a bounded array of objects under one key. */
+/** A request body that must hold a bounded array of objects, under one key or as the whole file. */
 interface ItemsRule {
-  key: string;
+  /** The key that holds the array. Absent when the file itself is the array. */
+  key?: string;
   max: number;
   requireEmail?: boolean;
 }
@@ -67,6 +72,8 @@ interface Endpoint {
   noBody?: true;
   body?: ItemsRule;
   batch?: true;
+  /** The response holds one send result per submitted message, and a nonzero ErrorCode fails that message. */
+  itemErrors?: true;
   collection?: { key: string; page?: Page };
   file?: string;
   /** The path carries :streamId, which comes from --message-stream. */
@@ -92,6 +99,32 @@ const WEBHOOK_CREDENTIAL_EXCEPTION: Exception = {
   rule: "CLI-CFG-4",
   reason: "Prints authentication credentials and custom header values unredacted. Previews and diagnostics stay redacted.",
 };
+
+const BOUNCE_TYPES = [
+  "HardBounce",
+  "Transient",
+  "Unsubscribe",
+  "Subscribe",
+  "AutoResponder",
+  "AddressChange",
+  "DnsError",
+  "SpamNotification",
+  "OpenRelayTest",
+  "Unknown",
+  "SoftBounce",
+  "VirusNotification",
+  "ChallengeVerification",
+  "BadEmailAddress",
+  "SpamComplaint",
+  "ManuallyDeactivated",
+  "Unconfirmed",
+  "Blocked",
+  "SMTPApiError",
+  "InboundError",
+  "DMARCPolicy",
+  "TemplateRenderingFailed",
+];
+const REBOUND_SNIPPET_URL = "https://postmarkapp.com/developer/api/bounce-api#rebound-javascript-snippet";
 
 const EXAMPLE_VALUES: Record<string, string> = {
   bulkRequestId: "e2ecbbfc-fe12-463d-b933-9fe22915106d",
@@ -186,6 +219,17 @@ const CAPPED: Page = { ...PAGE, cap: CAPPED_OFFSET };
 const ENDPOINTS: Endpoint[] = [
   { path: "emails send", method: "POST", apiPath: "/email", summary: "Send one email.", effect: "Sends one email from the server.", file: "email.json" },
   {
+    path: "emails batch-send",
+    method: "POST",
+    apiPath: "/email/batch",
+    summary: "Send up to 500 emails in one request.",
+    effect: "Sends up to 500 emails from the server, each processed independently.",
+    body: { max: 500 },
+    batch: true,
+    itemErrors: true,
+    file: "emails.json",
+  },
+  {
     path: "emails bulk send",
     method: "POST",
     apiPath: "/email/bulk",
@@ -213,6 +257,17 @@ const ENDPOINTS: Endpoint[] = [
     summary: "Send one email from a template.",
     effect: "Sends one email rendered from a template.",
     file: "template-email.json",
+  },
+  {
+    path: "templates batch-send",
+    method: "POST",
+    apiPath: "/email/batchWithTemplates",
+    summary: "Send up to 500 emails from templates in one request.",
+    effect: "Sends up to 500 emails rendered from templates, each processed independently.",
+    body: { key: "Messages", max: 500 },
+    batch: true,
+    itemErrors: true,
+    file: "template-emails.json",
   },
   {
     path: "templates push",
@@ -602,12 +657,18 @@ const ENDPOINTS: Endpoint[] = [
 ];
 
 export const groups: GroupSpec[] = [
-  { path: ["bounces"], summary: "List, get, and reactivate bounces, and read delivery statistics.", title: "Manage bounces." },
+  {
+    path: ["bounces"],
+    summary: "List, get, and reactivate bounces, read delivery statistics, and look up bounce reference data.",
+    title: "Manage bounces.",
+  },
   { path: ["bounces", "delivery-stats"], summary: "Read delivery and bounce counts.", title: "Inspect delivery statistics." },
   { path: ["bounces", "dump"], summary: "Read the raw source of bounces.", title: "Inspect bounce dumps." },
+  { path: ["bounces", "rebound-snippet"], summary: "Look up the rebound snippet documentation.", title: "Inspect the rebound snippet." },
+  { path: ["bounces", "types"], summary: "List the bounce type names.", title: "Inspect bounce types." },
   { path: ["data-removals"], summary: "Create and check data removal requests.", title: "Manage data removal requests." },
   { path: ["domains"], summary: "Manage sending domains and verify their DNS records.", title: "Manage sending domains." },
-  { path: ["emails"], summary: "Send emails in single and bulk requests.", title: "Manage emails." },
+  { path: ["emails"], summary: "Send emails singly, in batches, and in bulk requests.", title: "Manage emails." },
   { path: ["emails", "bulk"], summary: "Send and track bulk email requests.", title: "Manage bulk email requests." },
   { path: ["inbound-rules"], summary: "List, create, and delete inbound rule triggers.", title: "Manage inbound rules." },
   {
@@ -635,6 +696,28 @@ export const groups: GroupSpec[] = [
 ];
 
 export const commands: ResourceCommand[] = ENDPOINTS.map(resourceCommand);
+
+export const localCommands: LocalCommand[] = [
+  {
+    path: ["bounces", "types", "list"],
+    summary: "List the bounce type names.",
+    arguments: [],
+    options: [],
+    output: `Collection envelope. data is an array of the ${PROVIDER} bounce type names, the values of the Type field of a bounce; meta is empty.`,
+    unpaginated: "Not paginated. The command lists every entry.",
+    examples: [`${BIN} bounces types list`, `${BIN} bounces types list --format human`],
+    run: () => ({ data: BOUNCE_TYPES }),
+  },
+  {
+    path: ["bounces", "rebound-snippet", "get"],
+    summary: "Get the documentation URL of the rebound snippet.",
+    arguments: [],
+    options: [],
+    output: `Resource envelope. data has url, the ${PROVIDER} documentation page for the rebound JavaScript snippet; meta is empty.`,
+    examples: [`${BIN} bounces rebound-snippet get`, `${BIN} bounces rebound-snippet get --format human`],
+    run: () => ({ data: { url: REBOUND_SNIPPET_URL } }),
+  },
+];
 
 /**
  * Parses a --cursor value. Postmark pages by offset, so the cursor is the decimal offset
@@ -664,24 +747,33 @@ function resourceCommand(endpoint: Endpoint): ResourceCommand {
       : [{ rule: "CLI-GRAM-4", reason: `Preserves the ${PROVIDER} term "${action}".` }]),
     ...(endpoint.exceptions ?? []),
   ];
-  return {
+  const common = {
     path: words,
     summary: endpoint.summary,
     arguments: argumentSpecs,
     options: optionSpecs(endpoint, needsBody),
     effects: effectsOf(endpoint),
     output: outputText(endpoint),
+    credential: credentialOf(endpoint),
+    examples: examplesOf(endpoint, params, needsBody),
+    ...(exceptions.length > 0 ? { exceptions } : {}),
+  };
+  return {
+    ...common,
     method: endpoint.method,
+    ...(endpoint.itemErrors ? { settle: settleSends(endpoint) } : {}),
     ...(endpoint.collection ? { collectionKey: endpoint.collection.key } : {}),
     ...(page ? { pagination: { max: page.max, default: page.default, ordering: page.cap === undefined ? ORDERING : CAPPED_ORDERING } } : {}),
     ...(endpoint.collection && !page
       ? { unpaginated: `Not paginated. ${PROVIDER} returns the full list in one response; meta is empty.` }
       : {}),
     ...(endpoint.method === "GET" && !endpoint.collection && argumentSpecs.length > 0 ? { emptyIsNotFound: true } : {}),
-    examples: examplesOf(endpoint, params, needsBody),
-    ...(exceptions.length > 0 ? { exceptions } : {}),
-    request: (context) => requestOf(endpoint, params, context),
+    request: (context, resolved) => requestOf(endpoint, params, context, resolved),
   };
+}
+
+function credentialOf(endpoint: Endpoint): string {
+  return ACCOUNT_COMMANDS.some((prefix) => endpoint.path === prefix || endpoint.path.startsWith(`${prefix} `)) ? "account" : "server";
 }
 
 function pathParams(endpoint: Endpoint): string[] {
@@ -712,8 +804,7 @@ function optionSpecs(endpoint: Endpoint, needsBody: boolean): OptionSpec[] {
       name: "message-stream",
       placeholder: "ID",
       type: "string",
-      required: true,
-      description: "Message stream ID. Find IDs with 'streams list'.",
+      description: "Message stream ID. Find IDs with 'streams list'. Required unless the defaultMessageStream setting is set.",
       check: (value) => validateId("--message-stream", value),
     });
   }
@@ -745,6 +836,9 @@ function outputText(endpoint: Endpoint): string {
     return `Collection envelope. data is an array of ${collection.key}; meta has next_cursor (a decimal offset), has_more, and provider.TotalCount when ${PROVIDER} reports it.`;
   }
   if (collection) return `Collection envelope. data is an array of ${collection.key}; meta is empty.`;
+  if (endpoint.itemErrors) {
+    return `Resource envelope. data is an array with one send result per submitted message, in submission order; meta is empty. When ${PROVIDER} rejects any message, the command exits 8 with PARTIAL_FAILURE and error.partial lists the completed and failed messages.`;
+  }
   if (endpoint.batch) {
     return `Resource envelope. data is the ${PROVIDER} response with one result per submitted item; meta is empty. ${PROVIDER} answers HTTP 200 when items fail, so check every item.`;
   }
@@ -765,14 +859,14 @@ function examplesOf(endpoint: Endpoint, params: string[], needsBody: boolean): s
   return [base, `${base} --format human`];
 }
 
-function requestOf(endpoint: Endpoint, params: string[], context: Context): RequestSpec {
+function requestOf(endpoint: Endpoint, params: string[], context: Context, resolved: ResolvedEndpoint): RequestSpec {
   const page = endpoint.collection?.page;
   const query = userQuery(context, page !== undefined);
   if (page) checkCursor(context, page);
   const body = readBody(endpoint, context);
   const values = new Map(params.map((param, index) => [param, context.args[index] ?? ""]));
-  const stream = context.options.string("message-stream");
-  if (endpoint.messageStream && stream !== undefined) values.set("streamId", stream);
+  const stream = endpoint.messageStream ? messageStream(endpoint, context, resolved) : undefined;
+  if (stream !== undefined) values.set("streamId", stream);
   const metric = context.options.string("metric");
   const template = metric === undefined ? endpoint.apiPath : (endpoint.metrics?.[metric] ?? endpoint.apiPath);
   const path = template.replace(/:([A-Za-z0-9]+)/g, (_, param: string) => encodeURIComponent(values.get(param) ?? ""));
@@ -783,6 +877,16 @@ function requestOf(endpoint: Endpoint, params: string[], context: Context): Requ
     ...(body === undefined ? {} : { body }),
     ...(effect === undefined ? {} : { effect }),
   };
+}
+
+/** The --message-stream option, or the defaultMessageStream setting when the option is absent. */
+function messageStream(endpoint: Endpoint, context: Context, resolved: ResolvedEndpoint): string {
+  const stream = context.options.string("message-stream") ?? resolved.get("defaultMessageStream");
+  if (stream !== undefined) return stream;
+  throw usageError(
+    `Missing required option --message-stream for "${endpoint.path}".`,
+    `Add --message-stream ID, or set ${BIN.toUpperCase()}_DEFAULT_MESSAGE_STREAM or run '${BIN} profiles update NAME --default-message-stream ID'.`,
+  );
 }
 
 function filledEffect(effect: string, context: Context, stream: string | undefined): string {
@@ -815,18 +919,25 @@ function readBody(endpoint: Endpoint, context: Context): unknown {
   const source = context.options.string("file");
   if (source === undefined) return undefined;
   const body = readJsonFile(source);
+  const rule = endpoint.body;
+  if (rule && rule.key === undefined) {
+    checkItems(rule, body);
+    return body;
+  }
   if (!isRecord(body) || Object.keys(body).length === 0) {
     throw usageError("--file must contain a nonempty JSON object.", `Put every field of "${endpoint.path}" in the file.`);
   }
-  if (endpoint.body) checkItems(endpoint.body, body);
+  if (rule) checkItems(rule, body);
   return body;
 }
 
-function checkItems(rule: ItemsRule, body: Record<string, unknown>): void {
-  const items = body[rule.key];
+function checkItems(rule: ItemsRule, body: unknown): void {
+  const items = rule.key === undefined ? body : isRecord(body) ? body[rule.key] : undefined;
   if (!Array.isArray(items) || items.length < 1 || items.length > rule.max || !items.every(isNonemptyObject)) {
+    const subject = rule.key === undefined ? "--file" : `--file ${rule.key}`;
+    const location = rule.key === undefined ? "a JSON array" : `a JSON array under "${rule.key}"`;
     throw usageError(
-      `--file ${rule.key} must contain a JSON array under "${rule.key}" of 1 to ${rule.max} nonempty objects.`,
+      `${subject} must contain ${location} of 1 to ${rule.max} nonempty objects.`,
       `Split larger sets into requests of at most ${rule.max} items.`,
     );
   }
@@ -834,6 +945,71 @@ function checkItems(rule: ItemsRule, body: Record<string, unknown>): void {
   const index = items.findIndex((item) => typeof item.EmailAddress !== "string" || item.EmailAddress === "");
   if (index === -1) return;
   throw usageError(`--file ${rule.key} item ${index + 1} must have a nonempty EmailAddress.`, "Name every address explicitly.");
+}
+
+/** Fails PARTIAL_FAILURE when Postmark rejects any message of the batch the request sent. */
+function settleSends(endpoint: Endpoint): NonNullable<ResponseShape["settle"]> {
+  return (result, _context, helpers) => checkSendResults(submittedItems(endpoint.body, helpers.request.body), result.data, helpers);
+}
+
+/** The messages of a body that readBody already checked against its ItemsRule. */
+function submittedItems(rule: ItemsRule | undefined, body: unknown): Record<string, unknown>[] {
+  const items = rule?.key === undefined ? body : isRecord(body) ? body[rule.key] : undefined;
+  return Array.isArray(items) ? items.filter(isRecord) : [];
+}
+
+function messageName(message: Record<string, unknown>, index: number): string {
+  const recipient = typeof message.To === "string" && message.To !== "" ? ` (to ${message.To})` : "";
+  return `message ${index + 1}${recipient}`;
+}
+
+/**
+ * Postmark answers HTTP 200 with one result per message, in order. A nonzero ErrorCode means it rejected that message.
+ * Returns the results when every message was accepted and fails PARTIAL_FAILURE otherwise.
+ */
+function checkSendResults(sent: Record<string, unknown>[], data: unknown, helpers: HookHelpers): unknown {
+  if (!Array.isArray(data) || data.length !== sent.length) {
+    throw new CliError(
+      "INVALID_RESPONSE",
+      `${PROVIDER} returned ${Array.isArray(data) ? data.length : "no array of"} results for ${sent.length} submitted messages.`,
+      { hint: "Check the remote state before retrying.", outcome: "unknown", provider: helpers.provider },
+    );
+  }
+  const partial: StepPartial = { completed: [], failed: [], not_attempted: [] };
+  let unreadable = false;
+  for (const [index, result] of data.entries()) {
+    const name = messageName(sent[index] ?? {}, index);
+    if (!isRecord(result) || typeof result.ErrorCode !== "number") {
+      unreadable = true;
+      partial.failed.push({
+        step: name,
+        error: { code: "INVALID_RESPONSE", message: `${PROVIDER} returned no numeric ErrorCode for the message, so its outcome is unknown.` },
+      });
+      continue;
+    }
+    if (result.ErrorCode === 0) {
+      partial.completed.push({ step: name, result });
+      continue;
+    }
+    const reason = typeof result.Message === "string" && result.Message !== "" ? `: ${result.Message}` : "";
+    partial.failed.push({
+      step: name,
+      error: {
+        code: "INVALID_REQUEST",
+        message: `${PROVIDER} rejected the message${reason} (ErrorCode ${result.ErrorCode}).`,
+        provider: { code: result.ErrorCode },
+      },
+    });
+  }
+  if (partial.failed.length === 0) return data;
+  throw stepsFailure(partial, {
+    unit: "items",
+    provider: helpers.provider,
+    hint: unreadable
+      ? "Check the remote state of the failed messages before sending them again. Postmark accepted the completed messages."
+      : "Send only the failed messages again. Postmark accepted the completed messages.",
+    ...(unreadable ? { cause: "INVALID_RESPONSE" as const, outcome: "unknown" as const } : {}),
+  });
 }
 
 function isNonemptyObject(value: unknown): value is Record<string, unknown> {

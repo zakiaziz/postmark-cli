@@ -1,8 +1,8 @@
 import { CliError } from "./core/errors.js";
 import type { PageInfo, PageRequest, Provider, ProviderErrorDetail } from "./core/provider.js";
 import { HTTP_METHODS } from "./core/types.js";
-import { isRecord, visibleAsciiConstraint } from "./core/values.js";
-import { commands, groups, parseOffset } from "./registry.js";
+import { ID_RULE, isRecord, visibleAsciiConstraint } from "./core/values.js";
+import { commands, groups, localCommands, parseOffset } from "./registry.js";
 
 export const provider: Provider = {
   bin: "postmark",
@@ -11,12 +11,27 @@ export const provider: Provider = {
     { key: "accountToken", label: "account token", validate: visibleAsciiConstraint },
     { key: "serverToken", label: "server token", validate: visibleAsciiConstraint },
   ],
-  authScheme: "the X-Postmark-Account-Token and X-Postmark-Server-Token headers",
+  credentialSets: [
+    { name: "account", fields: ["accountToken"] },
+    { name: "server", fields: ["serverToken"] },
+  ],
+  credentialSelection: "per-request",
+  credentialOption: { name: "token-type", placeholder: "TOKEN_TYPE", noun: "token type" },
+  authScheme: "the X-Postmark-Account-Token header for the account credential or the X-Postmark-Server-Token header for the server credential",
   authorize: (credential) => ({
-    "X-Postmark-Account-Token": credential.accountToken ?? "",
-    "X-Postmark-Server-Token": credential.serverToken ?? "",
+    ...(credential.accountToken === undefined ? {} : { "X-Postmark-Account-Token": credential.accountToken }),
+    ...(credential.serverToken === undefined ? {} : { "X-Postmark-Server-Token": credential.serverToken }),
   }),
   baseUrl: { default: "https://api.postmarkapp.com", allowPath: false },
+  endpointFields: [
+    {
+      key: "defaultMessageStream",
+      label: "default message stream",
+      placeholder: "ID",
+      example: "outbound",
+      validate: idConstraint,
+    },
+  ],
   requestIdHeader: "x-postmark-request-id",
   errorDetail,
   pagination: {
@@ -26,24 +41,40 @@ export const provider: Provider = {
     },
     read: readPage,
   },
-  verify: {
-    method: "GET",
-    path: "/server",
-    query: [],
-    effect:
-      "Sends GET /server. Success proves that Postmark accepted the server token for that read and identifies the server. It does not prove that the account token is valid, or complete permission coverage.",
-    identity: serverIdentity,
-  },
+  verify: [
+    {
+      credential: "account",
+      method: "GET",
+      path: "/servers",
+      query: [
+        ["count", "1"],
+        ["offset", "0"],
+      ],
+      effect:
+        "Sends GET /servers?count=1&offset=0. Success proves that Postmark accepted the account token for that read. It does not prove complete permission coverage.",
+      validate: checkServerList,
+    },
+    {
+      credential: "server",
+      method: "GET",
+      path: "/server",
+      query: [],
+      effect:
+        "Sends GET /server. Success proves that Postmark accepted the server token for that read and identifies the server. It does not prove complete permission coverage.",
+      identity: serverIdentity,
+    },
+  ],
   api: {
     methods: HTTP_METHODS,
     examples: [
-      "postmark api request GET /server",
-      "postmark api request GET /servers --query count=10 --query offset=0",
-      "postmark api request PUT /server --file request.json --dry-run",
+      "postmark api request GET /server --token-type server",
+      "postmark api request GET /servers --token-type account --query count=10 --query offset=0",
+      "postmark api request PUT /server --token-type server --file request.json --dry-run",
     ],
   },
   groups,
   commands,
+  localCommands,
 };
 
 function errorDetail(body: unknown): ProviderErrorDetail {
@@ -66,6 +97,18 @@ function readPage(payload: unknown, _collectionKey: string | undefined, page: Pa
     nextCursor: exhausted ? null : String(next),
     ...(total === undefined ? {} : { provider: { TotalCount: total } }),
   };
+}
+
+function idConstraint(value: string): string | undefined {
+  const valid = value !== "" && value !== "." && value !== ".." && !/[\u0000-\u001f\u007f]/.test(value);
+  return valid ? undefined : `be ${ID_RULE}`;
+}
+
+function checkServerList(payload: unknown): void {
+  if (isRecord(payload) && Array.isArray(payload.Servers)) return;
+  throw new CliError("INVALID_RESPONSE", "Postmark returned no Servers array for auth verify.", {
+    hint: "Retry later. If the failure persists, the Postmark API contract may have changed.",
+  });
 }
 
 function serverIdentity(payload: unknown): { ID: unknown; Name: unknown } {

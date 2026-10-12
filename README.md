@@ -35,6 +35,8 @@ postmark templates delete welcome-email --dry-run
 | postmark bounces activate BOUNCE_ID | Reactivate the address of a bounce. | --yes, --dry-run |
 | postmark bounces delivery-stats get | Get delivery and bounce counts for the server. | --query KEY=VALUE |
 | postmark bounces dump get BOUNCE_ID | Get the raw source of a bounce. | --query KEY=VALUE |
+| postmark bounces rebound-snippet get | Get the documentation URL of the rebound snippet. | None |
+| postmark bounces types list | List the bounce type names. | None |
 
 ### data-removals
 
@@ -62,6 +64,7 @@ postmark templates delete welcome-email --dry-run
 | Command | Description | Options |
 | --- | --- | --- |
 | postmark emails send | Send one email. | --file PATH, --yes, --dry-run |
+| postmark emails batch-send | Send up to 500 emails in one request. | --file PATH, --yes, --dry-run |
 | postmark emails bulk get BULK_REQUEST_ID | Get the status of a bulk email request. | --query KEY=VALUE |
 | postmark emails bulk send | Start a bulk email request. | --file PATH, --yes, --dry-run |
 
@@ -156,6 +159,7 @@ postmark templates delete welcome-email --dry-run
 | postmark templates send | Send one email from a template. | --file PATH, --yes, --dry-run |
 | postmark templates push | Push templates to another server. | --file PATH, --yes, --dry-run |
 | postmark templates validate | Validate a template and render a test. | --file PATH |
+| postmark templates batch-send | Send up to 500 emails from templates in one request. | --file PATH, --yes, --dry-run |
 
 ### webhooks
 
@@ -171,7 +175,7 @@ postmark templates delete welcome-email --dry-run
 
 | Command | Description | Options |
 | --- | --- | --- |
-| postmark setup [NAME] | Create and activate a profile. | --account-token-file PATH, --server-token-file PATH, --base-url URL, --from-env |
+| postmark setup [NAME] | Create and activate a profile. | --account-token-file PATH, --server-token-file PATH, --base-url URL, --default-message-stream ID, --from-env |
 
 ### profiles
 
@@ -179,8 +183,8 @@ postmark templates delete welcome-email --dry-run
 | --- | --- | --- |
 | postmark profiles list | List saved profiles. | None |
 | postmark profiles get NAME | Get one saved profile with secrets redacted. | None |
-| postmark profiles create NAME | Create a profile without activating it. | --account-token-file PATH, --server-token-file PATH, --base-url URL |
-| postmark profiles update NAME | Update fields of a profile. | --account-token-file PATH, --server-token-file PATH, --base-url URL, --clear-base-url |
+| postmark profiles create NAME | Create a profile without activating it. | --account-token-file PATH, --server-token-file PATH, --base-url URL, --default-message-stream ID |
+| postmark profiles update NAME | Update fields of a profile. | --account-token-file PATH, --server-token-file PATH, --base-url URL, --default-message-stream ID, --clear-base-url, --clear-default-message-stream |
 | postmark profiles delete NAME | Delete a profile. | None |
 | postmark profiles use NAME | Make a profile the active profile. | None |
 
@@ -198,13 +202,13 @@ postmark templates delete welcome-email --dry-run
 
 | Command | Description | Options |
 | --- | --- | --- |
-| postmark auth verify | Verify the account token and server token. | None |
+| postmark auth verify | Verify the account token or server token. | --token-type TOKEN_TYPE |
 
 ### api
 
 | Command | Description | Options |
 | --- | --- | --- |
-| postmark api request METHOD PATH | Send a raw API request. | --query KEY=VALUE, --file PATH, --yes, --dry-run |
+| postmark api request METHOD PATH | Send a raw API request. | --query KEY=VALUE, --file PATH, --yes, --dry-run, --token-type TOKEN_TYPE |
 
 ### completions
 
@@ -230,14 +234,16 @@ Network commands (the resource commands, `auth verify`, and `api request`) accep
 
 ## Authentication
 
-Postmark uses two token types. A server token (`X-Postmark-Server-Token`) sends email and manages one server. An account token (`X-Postmark-Account-Token`) manages servers, domains, sender signatures, and data removals. The two tokens form one credential set, so you supply both together, and every request sends both.
+Postmark uses two token types, and the CLI treats each as its own credential. A server token (`X-Postmark-Server-Token`) sends email and manages one server. An account token (`X-Postmark-Account-Token`) manages servers, domains, sender signatures, and data removals, and pushes templates between servers. Each command sends only the token it needs: `servers`, `domains`, `signatures`, `data-removals`, and `templates push` commands use the account token, and every other resource command uses the server token. Supply only the tokens you use. A command fails with `AUTHENTICATION_REQUIRED` when its token is missing. `api request` takes a required `--token-type account|server` option that names the token to send. `auth verify` takes the same option to check one token, and without it checks every token you have supplied.
 
 ```bash
 postmark setup work --account-token-file ./postmark-account-token.txt --server-token-file ./postmark-server-token.txt
+postmark auth verify --token-type server
+postmark auth verify --token-type account
 postmark auth verify
 ```
 
-`setup [NAME]` creates a profile (default name: `default`) and makes it the active profile. It fails when the profile exists. If activation fails after the profile is written, the profile stays saved and `setup` exits 8 with `PARTIAL_FAILURE`. In a terminal without `--no-input`, `setup` prompts for a missing token with hidden input. Secrets are never command-line values: pass `--account-token-file PATH` and `--server-token-file PATH` (`-` reads stdin), set `POSTMARK_ACCOUNT_TOKEN` and `POSTMARK_SERVER_TOKEN`, or enter the tokens at the prompt. `setup --from-env` copies `POSTMARK_ACCOUNT_TOKEN`, `POSTMARK_SERVER_TOKEN`, and `POSTMARK_BASE_URL` into the profile and cannot be combined with the token file options or `--base-url`.
+`setup [NAME]` creates a profile (default name: `default`) and makes it the active profile. It fails when the profile exists. If activation fails after the profile is written, the profile stays saved and `setup` exits 8 with `PARTIAL_FAILURE`. In a terminal without `--no-input`, `setup` prompts for each token with hidden input when you supply none, and a blank answer skips that token. It needs at least one token. Secrets are never command-line values: pass `--account-token-file PATH` and `--server-token-file PATH` (`-` reads stdin), set `POSTMARK_ACCOUNT_TOKEN` and `POSTMARK_SERVER_TOKEN`, or enter the tokens at the prompt. `setup --from-env` copies `POSTMARK_ACCOUNT_TOKEN`, `POSTMARK_SERVER_TOKEN`, `POSTMARK_BASE_URL`, and `POSTMARK_DEFAULT_MESSAGE_STREAM` into the profile and cannot be combined with the token file options, `--base-url`, or `--default-message-stream`.
 
 | Variable | Purpose |
 | --- | --- |
@@ -245,6 +251,7 @@ postmark auth verify
 | `POSTMARK_ACCOUNT_TOKEN` | Postmark account token. |
 | `POSTMARK_SERVER_TOKEN` | Postmark server token. |
 | `POSTMARK_BASE_URL` | API base URL. Default: `https://api.postmarkapp.com`. |
+| `POSTMARK_DEFAULT_MESSAGE_STREAM` | Message stream that `suppressions` commands use when `--message-stream` is absent. |
 | `XDG_CONFIG_HOME` | Configuration root when it is an absolute path. Otherwise `~/.config`. |
 | `NO_COLOR` | Disables color with `--color auto` when set and nonempty. |
 | `CI` | Disables prompts when nonempty and not `0` or `false`. |
@@ -254,10 +261,11 @@ A `POSTMARK_` variable that is set but empty, a malformed `POSTMARK_PROFILE`, an
 Precedence:
 
 1. Profile selection: `--profile`, `POSTMARK_PROFILE`, then `activeProfile` in `config.json`. A selected or active profile that does not exist fails with `CONFIGURATION_ERROR`, with no fallback.
-2. Credentials: the environment variables, then the selected profile. The set comes whole from the first source that supplies any part of it, and a partial set fails with `AUTHENTICATION_REQUIRED`.
+2. Credentials: the environment variables, then the selected profile. The first source that supplies any token is the source for both, so a token the environment lacks is not read from the profile. A command whose token that source lacks fails with `AUTHENTICATION_REQUIRED`.
 3. Base URL: `POSTMARK_BASE_URL`, the selected profile, `baseUrl` in `config.json`, then the default.
+4. Default message stream: `POSTMARK_DEFAULT_MESSAGE_STREAM`, the selected profile, `defaultMessageStream` in `config.json`. There is no built-in default. `--message-stream` overrides it.
 
-`postmark auth verify` sends `GET /server`. Success proves that Postmark accepted the server token for that read, and `identity` holds the server `ID` and `Name`. It does not prove that the account token is valid or complete permission coverage.
+`postmark auth verify --token-type server` sends `GET /server`. Success proves that Postmark accepted the server token for that read, and `identity` holds the server `ID` and `Name`. `postmark auth verify --token-type account` sends `GET /servers?count=1&offset=0` and proves only that Postmark accepted the account token for that read. Neither proves complete permission coverage. `postmark auth verify` with no option runs the check of every token you have supplied, one request each, and prints one entry per check in `data.checks`, each led by its `token_type`. When some checks pass and others fail, it exits 8 with `PARTIAL_FAILURE`, `error.partial.completed` lists the checks that passed and `error.partial.failed` lists the failures. When every check fails, it reports the first failure unchanged. With no token at all it fails with `AUTHENTICATION_REQUIRED`.
 
 ## Output and errors
 
@@ -288,7 +296,7 @@ Errors print one document on stderr, for example `{"error":{"code":"RATE_LIMITED
 | 9 | `CONFIRMATION_REQUIRED`, `CONFIRMATION_DECLINED` |
 | 130 | `INTERRUPTED` |
 
-IDs are opaque strings, and each one is sent as a single percent-encoded path segment. Options accept `--name value` and `--name=value`, and `--` ends options. Unknown commands, options, extra arguments, invalid values, and conflicting options fail with exit code 2 before any request. Complete request bodies come only from `--file PATH` (`-` reads stdin), and provider filters on reads come from the repeatable `--query KEY=VALUE`. Postmark answers HTTP 200 for the suppression batch commands even when single addresses fail, so check the `Status` and `Message` of every item in `data`.
+IDs are opaque strings, and each one is sent as a single percent-encoded path segment. Options accept `--name value` and `--name=value`, and `--` ends options. Unknown commands, options, extra arguments, invalid values, and conflicting options fail with exit code 2 before any request. Complete request bodies come only from `--file PATH` (`-` reads stdin), and provider filters on reads come from the repeatable `--query KEY=VALUE`. Postmark answers HTTP 200 for the suppression batch commands even when single addresses fail, so check the `Status` and `Message` of every item in `data`. `emails batch-send` and `templates batch-send` also get HTTP 200 with one result per message, but they fail the command: when Postmark rejects any message (nonzero `ErrorCode`), the command exits 8 with `PARTIAL_FAILURE`, and `error.partial.completed` and `error.partial.failed` list each message by its position and recipient. Nothing is rolled back, so send only the failed messages again.
 
 Mutations (every command with `--yes` and `--dry-run`, and `api request` with `POST`, `PUT`, `PATCH`, or `DELETE`) need confirmation. The CLI validates arguments first, then resolves credentials (exit 3 when missing), then asks for confirmation. In a terminal, it shows the profile, operation, request, and effect, then prompts. `--yes` confirms without a prompt. With `--no-input`, a non-terminal stdin or stderr, or CI mode, a missing confirmation exits 9. Ctrl-C or end of input at a prompt exits 130 with `INTERRUPTED`. `--dry-run` prints a redacted preview of the request and sends nothing. It needs no credentials. Preview success does not guarantee that the request succeeds. `templates validate` is a read: it sends a POST that changes nothing, so it takes no `--yes` or `--dry-run`.
 
@@ -314,12 +322,12 @@ A repeated cursor or an oversized page on the first page fails with `INVALID_RES
 ## Raw API access
 
 ```bash
-postmark api request GET /server
-postmark api request GET /servers --query count=10 --query offset=0
-postmark api request PUT /server --file request.json --dry-run
+postmark api request GET /server --token-type server
+postmark api request GET /servers --token-type account --query count=10 --query offset=0
+postmark api request PUT /server --token-type server --file request.json --dry-run
 ```
 
-Methods: `GET`, `HEAD`, `OPTIONS`, `POST`, `PUT`, `PATCH`, `DELETE`. `PATH` starts with a single `/` and has no scheme, host, query string, fragment, whitespace, or `.` and `..` segments. Add query parameters with the repeatable `--query KEY=VALUE`. `--file PATH` sends a JSON body as `application/json` (`-` reads stdin). `--file`, `--yes`, and `--dry-run` are rejected on `GET`, `HEAD`, and `OPTIONS`. The CLI sends the selected credentials, as the `X-Postmark-Account-Token` and `X-Postmark-Server-Token` headers, only to the configured API origin, and redirects fail. JSON responses print as parsed, other text prints as a JSON string, an empty body prints `null`, and binary responses fail with `UNSUPPORTED_RESPONSE`. Non-2xx responses use the same error mapping as other commands.
+Methods: `GET`, `HEAD`, `OPTIONS`, `POST`, `PUT`, `PATCH`, `DELETE`. `PATH` starts with a single `/` and has no scheme, host, query string, fragment, whitespace, or `.` and `..` segments. Add query parameters with the repeatable `--query KEY=VALUE`. `--file PATH` sends a JSON body as `application/json` (`-` reads stdin). `--file`, `--yes`, and `--dry-run` are rejected on `GET`, `HEAD`, and `OPTIONS`. `--token-type account|server` is required and names the token to send, as the `X-Postmark-Account-Token` or `X-Postmark-Server-Token` header. The CLI sends it only to the configured API origin, and redirects fail. JSON responses print as parsed, other text prints as a JSON string, an empty body prints `null`, and binary responses fail with `UNSUPPORTED_RESPONSE`. Non-2xx responses use the same error mapping as other commands.
 
 ## Configuration
 
@@ -328,10 +336,10 @@ Files live in `$XDG_CONFIG_HOME/postmark` when `XDG_CONFIG_HOME` is an absolute 
 ```text
 postmark/
   config.json            {"activeProfile": "work", "baseUrl": "https://..."}
-  profiles/NAME.json     {"accountToken": "...", "serverToken": "...", "baseUrl": "https://..."}
+  profiles/NAME.json     {"accountToken": "...", "serverToken": "...", "baseUrl": "https://...", "defaultMessageStream": "outbound"}
 ```
 
-Keys are camelCase. Files use mode `0600`, directories use mode `0700`, and writes are atomic: the CLI creates a temporary file exclusively with mode `0600` in the same directory, then renames it. Reads reject unknown keys and non-object JSON with `CONFIGURATION_ERROR`. Profile names match `^[A-Za-z0-9._-]+$` and are not `.` or `..`. `config.json` keys: `activeProfile` (read-only through `config`; change it with `profiles use`) and `baseUrl`. Profile fields: `accountToken`, `serverToken`, and `baseUrl`. Secrets are redacted in previews, diagnostics, `profiles get`, and `config list`.
+Keys are camelCase. Files use mode `0600`, directories use mode `0700`, and writes are atomic: the CLI creates a temporary file exclusively with mode `0600` in the same directory, then renames it. Reads reject unknown keys and non-object JSON with `CONFIGURATION_ERROR`. Profile names match `^[A-Za-z0-9._-]+$` and are not `.` or `..`. `config.json` keys: `activeProfile` (read-only through `config`; change it with `profiles use`), `baseUrl`, and `defaultMessageStream`. Profile fields: `accountToken`, `serverToken`, `baseUrl`, and `defaultMessageStream`. Secrets are redacted in previews, diagnostics, `profiles get`, and `config list`.
 
 A base URL, from `--base-url`, `config set baseUrl`, `POSTMARK_BASE_URL`, or a stored file, must be an `https` URL (`http` only for `localhost`, `127.0.0.1`, or `::1`) with no credentials, query string, fragment, or path. Values are stored unchanged, and requests go to the URL's origin.
 
@@ -341,6 +349,7 @@ Completion scripts come from `postmark completions bash|zsh|fish` and read only 
 
 | Rule | Decision | Reason |
 | --- | --- | --- |
+| `CLI-GRAM-4` | `emails batch-send`, `templates batch-send` | Preserve the Postmark terms "send batch emails" and "send batch with templates". Each is a batch form of the domain action `send`. |
 | `CLI-GRAM-4` | `templates push` | Preserves the Postmark term "push templates". |
 | `CLI-GRAM-4` | `templates validate` | Preserves the Postmark term "validate a template". It is a read-only POST. |
 | `CLI-GRAM-4` | `bounces activate` | Preserves the Postmark term "activate a bounce". |
