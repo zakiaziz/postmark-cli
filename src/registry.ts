@@ -705,7 +705,7 @@ export const localCommands: LocalCommand[] = [
     options: [],
     output: `Collection envelope. data is an array of the ${PROVIDER} bounce type names, the values of the Type field of a bounce; meta is empty.`,
     unpaginated: "Not paginated. The command lists every entry.",
-    examples: [`${BIN} bounces types list`, `${BIN} bounces types list --format human`],
+    examples: [`${BIN} bounces types list`, `${BIN} bounces types list --format json`],
     run: () => ({ data: BOUNCE_TYPES }),
   },
   {
@@ -714,7 +714,7 @@ export const localCommands: LocalCommand[] = [
     arguments: [],
     options: [],
     output: `Resource envelope. data has url, the ${PROVIDER} documentation page for the rebound JavaScript snippet; meta is empty.`,
-    examples: [`${BIN} bounces rebound-snippet get`, `${BIN} bounces rebound-snippet get --format human`],
+    examples: [`${BIN} bounces rebound-snippet get`, `${BIN} bounces rebound-snippet get --format json`],
     run: () => ({ data: { url: REBOUND_SNIPPET_URL } }),
   },
 ];
@@ -765,7 +765,7 @@ function resourceCommand(endpoint: Endpoint): ResourceCommand {
     ...(endpoint.collection ? { collectionKey: endpoint.collection.key } : {}),
     ...(page ? { pagination: { max: page.max, default: page.default, ordering: page.cap === undefined ? ORDERING : CAPPED_ORDERING } } : {}),
     ...(endpoint.collection && !page
-      ? { unpaginated: `Not paginated. ${PROVIDER} returns the full list in one response; meta is empty.` }
+      ? { unpaginated: `Not paginated. ${PROVIDER} returns the full list in one response; meta has profile.` }
       : {}),
     ...(endpoint.method === "GET" && !endpoint.collection && argumentSpecs.length > 0 ? { emptyIsNotFound: true } : {}),
     request: (context, resolved) => requestOf(endpoint, params, context, resolved),
@@ -833,18 +833,18 @@ function effectsOf(endpoint: Endpoint): ResourceCommand["effects"] {
 function outputText(endpoint: Endpoint): string {
   const { collection } = endpoint;
   if (collection?.page) {
-    return `Collection envelope. data is an array of ${collection.key}; meta has next_cursor (a decimal offset), has_more, and provider.TotalCount when ${PROVIDER} reports it.`;
+    return `Collection envelope. data is an array of ${collection.key}; meta has profile, next_cursor (a decimal offset), has_more, and provider.TotalCount when ${PROVIDER} reports it.`;
   }
-  if (collection) return `Collection envelope. data is an array of ${collection.key}; meta is empty.`;
+  if (collection) return `Collection envelope. data is an array of ${collection.key}; meta has profile.`;
   if (endpoint.itemErrors) {
-    return `Resource envelope. data is an array with one send result per submitted message, in submission order; meta is empty. When ${PROVIDER} rejects any message, the command exits 8 with PARTIAL_FAILURE and error.partial lists the completed and failed messages.`;
+    return `Resource envelope. data is an array with one send result per submitted message, in submission order; meta has profile. When ${PROVIDER} rejects any message, the command exits 8 with PARTIAL_FAILURE and error.partial lists the completed and failed messages.`;
   }
   if (endpoint.batch) {
-    return `Resource envelope. data is the ${PROVIDER} response with one result per submitted item; meta is empty. ${PROVIDER} answers HTTP 200 when items fail, so check every item.`;
+    return `Resource envelope. data is the ${PROVIDER} response with one result per submitted item; meta has profile. ${PROVIDER} answers HTTP 200 when items fail, so check every item.`;
   }
   const result = RESULTS[endpoint.path];
   if (result === undefined) throw new Error(`No Output sentence for command "${endpoint.path}".`);
-  return `Resource envelope. data is ${result}; meta is empty.`;
+  return `Resource envelope. data is ${result}; meta has profile.`;
 }
 
 function examplesOf(endpoint: Endpoint, params: string[], needsBody: boolean): string[] {
@@ -855,8 +855,8 @@ function examplesOf(endpoint: Endpoint, params: string[], needsBody: boolean): s
   const withFile = needsBody ? `${base} --file ${endpoint.file ?? "request.json"}` : base;
   if (endpoint.effect !== undefined) return [`${withFile} --dry-run`, `${withFile} --yes`];
   if (needsBody) return [withFile];
-  if (endpoint.collection?.page) return [base, `${base} --all --max-items 200`, `${base} --format human`];
-  return [base, `${base} --format human`];
+  if (endpoint.collection?.page) return [base, `${base} --all --max-items 200`, `${base} --format json`];
+  return [base, `${base} --format json`];
 }
 
 function requestOf(endpoint: Endpoint, params: string[], context: Context, resolved: ResolvedEndpoint): RequestSpec {

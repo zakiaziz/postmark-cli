@@ -15,7 +15,6 @@ export const provider: Provider = {
     { name: "account", fields: ["accountToken"] },
     { name: "server", fields: ["serverToken"] },
   ],
-  credentialSelection: "per-request",
   credentialOption: { name: "token-type", placeholder: "TOKEN_TYPE", noun: "token type" },
   authScheme: "the X-Postmark-Account-Token header for the account credential or the X-Postmark-Server-Token header for the server credential",
   authorize: (credential) => ({
